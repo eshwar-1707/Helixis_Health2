@@ -1,17 +1,22 @@
 from flask import Flask, request, jsonify
-from collections import defaultdict, deque
 import requests
-import openai
 import os
+from collections import defaultdict, deque
 
 app = Flask(__name__)
 
-# ====== CONFIG ======
-VERIFY_TOKEN = "hackathon2025"
-WHATSAPP_TOKEN = "EAAg0NTccUccBPdNB6DcgyonLIDeObqadZAaOKbMYEsZCoxSfsQV8CG6tf0ZBncZCg0MirPYZAcK3CKubOLG10ZAPO1SKsZBa6H6JpBJTQdL92GTxy7y36jxTOWYAYEfE81lPhshrJCDYgPlMnhSO7HV4IBuuUxfJRgBazeBYc5pBV6PHiI9HzIGlIf0aD05"
-PHONE_NUMBER_ID = "822103324313430"
-OPENAI_API_KEY = "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"
-openai.api_key = OPENAI_API_KEY
+# ====== CONFIG FROM ENV ======
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+
+# List of API keys (rotate through them)
+GEMINI_API_KEYS = [
+    os.getenv("GEMINI_KEY_1"),
+    os.getenv("GEMINI_KEY_2"),
+    os.getenv("GEMINI_KEY_3"),
+]
+current_key_index = 0
 
 # ====== MEMORY ======
 user_conversations = defaultdict(lambda: deque(maxlen=20))
@@ -20,12 +25,12 @@ user_conversations = defaultdict(lambda: deque(maxlen=20))
 SYSTEM_PROMPT = (
     "You are a helpful **medical-only AI assistant**. "
     "You only provide information related to **health, symptoms, first aid, and medical advice**. "
-    "If the user asks about something unrelated, politely decline and redirect them back to health topics. "
-    "Keep answers concise, clear, and professional. "
-    "Always reply in the same language the user uses."
+    "If the user asks about something unrelated (like politics, sports, coding, etc.), "
+    "politely decline and redirect them back to health-related topics. "
+    "Keep your answers concise, clear, and professional."
 )
 
-# ====== VERIFY WEBHOOK ======
+# ====== WHATSAPP VERIFY WEBHOOK ======
 
 
 @app.route("/webhook", methods=["GET"])
@@ -33,6 +38,7 @@ def verify_webhook():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
+
     if mode == "subscribe" and token == VERIFY_TOKEN:
         return challenge, 200
     else:
@@ -45,37 +51,31 @@ def verify_webhook():
 def webhook():
     data = request.get_json()
     try:
-        changes = data["entry"][0]["changes"][0]["value"]
-
-        if "messages" not in changes:  # Skip non-message updates
-            return "No message", 200
-
-        entry = changes["messages"][0]
+        entry = data["entry"][0]["changes"][0]["value"]["messages"][0]
         sender_id = entry["from"]
         user_message = entry["text"]["body"]
 
-        # Reset memory
         if user_message.lower().strip() == "reset":
             user_conversations[sender_id].clear()
             send_message(sender_id, "✅ Memory cleared. Let's start fresh.")
             return "OK", 200
 
-        # Store user input
+        # Append user message
         user_conversations[sender_id].append(
             {"role": "user", "content": user_message})
 
-        # Build prompt
+        # Build messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(list(user_conversations[sender_id]))
 
-        # Get GPT reply
-        reply = get_openai_response(messages)
+        # Get reply from Gemini
+        reply = get_gemini_response(messages)
 
-        # Store reply
+        # Save bot reply
         user_conversations[sender_id].append(
             {"role": "assistant", "content": reply})
 
-        # Send reply
+        # Send reply back to WhatsApp
         send_message(sender_id, reply)
 
     except Exception as e:
@@ -83,31 +83,64 @@ def webhook():
 
     return "OK", 200
 
-# ====== OPENAI GPT CALL ======
+# ====== GEMINI CALL WITH KEY ROTATION ======
 
 
-def get_openai_response(messages):
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=500
-        )
-        return resp.choices[0].message["content"].strip()
-    except Exception as e:
-        print("❌ OpenAI API error:", e)
-        return "⚠ Sorry, I couldn’t process that."
+def get_gemini_response(messages):
+    global current_key_index
+
+    for _ in range(len(GEMINI_API_KEYS)):
+        api_key = GEMINI_API_KEYS[current_key_index]
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        headers = {"Content-Type": "application/json"}
+        params = {"key": api_key}
+
+        contents = []
+        for msg in messages:
+            if msg["role"] in ["system", "user"]:
+                contents.append({"role": "user", "parts": [
+                                {"text": msg["content"]}]})
+            else:
+                contents.append({"role": "model", "parts": [
+                                {"text": msg["content"]}]})
+
+        payload = {"contents": contents}
+
+        try:
+            resp = requests.post(url, headers=headers,
+                                 params=params, json=payload)
+            resp_json = resp.json()
+
+            if "error" in resp_json and "quota" in resp_json["error"]["message"].lower():
+                print(
+                    f"⚠ Quota exceeded for key {current_key_index+1}, switching key...")
+                current_key_index = (current_key_index +
+                                     1) % len(GEMINI_API_KEYS)
+                continue
+
+            return resp_json["candidates"][0]["content"]["parts"][0]["text"]
+
+        except Exception as e:
+            print("❌ Gemini API error:", e)
+            return "⚠ Sorry, I couldn’t process that."
+
+    return "⚠ All API keys exhausted, try again later."
 
 # ====== SEND MESSAGE TO WHATSAPP ======
 
 
 def send_message(to, text):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}",
-               "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp",
-               "to": to, "type": "text", "text": {"body": text}}
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
     requests.post(url, headers=headers, json=payload)
 
 # ====== DEBUG STATUS ======
