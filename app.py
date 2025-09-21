@@ -28,6 +28,7 @@ SYSTEM_PROMPT = (
     "If the user asks about something unrelated (like politics, sports, coding, etc.), "
     "politely decline and redirect them back to health-related topics. "
     "Keep your answers concise, clear, and professional. "
+    "⚠️ IMPORTANT: Always reply in the **same language** that the user used in their message."
 )
 
 
@@ -52,10 +53,17 @@ def verify_webhook():
 def webhook():
     data = request.get_json()
     try:
-        entry = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        change_value = data["entry"][0]["changes"][0]["value"]
+
+        # ✅ Ignore events that don’t contain "messages" (like delivery receipts, read receipts, etc.)
+        if "messages" not in change_value:
+            return "OK", 200
+
+        entry = change_value["messages"][0]
         sender_id = entry["from"]
         user_message = entry["text"]["body"]
 
+        # Reset memory
         if user_message.lower().strip() == "reset":
             user_conversations[sender_id].clear()
             send_message(sender_id, "✅ Memory cleared. Let's start fresh.")
@@ -83,6 +91,7 @@ def webhook():
         print("❌ Error handling message:", e)
 
     return "OK", 200
+
 
 # ====== GEMINI CALL WITH KEY ROTATION ======
 
