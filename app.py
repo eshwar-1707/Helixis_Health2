@@ -28,9 +28,6 @@ SYSTEM_PROMPT = (
     "If the user asks about something unrelated (like politics, sports, coding, etc.), "
     "politely decline and redirect them back to health-related topics. "
     "Keep your answers concise, clear, and professional. "
-    "⚠️ IMPORTANT: Always reply in the **same language** as the user, "
-    "but when replying in **Telugu or other Indian languages**, use **English letters (Romanized transliteration)** instead of the native script. "
-    "Example: Instead of 'క్షమించండి', write 'kshaminchandi'."
 )
 
 
